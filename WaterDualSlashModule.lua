@@ -1,0 +1,176 @@
+local module = {}
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Debris = game:GetService("Debris")
+local ServerStorage = game:GetService("ServerStorage")
+
+local Events = ReplicatedStorage:WaitForChild("Events")
+local WaterAnim = ReplicatedStorage.Animations.Styles.Breath.Water:WaitForChild("WaterDualSlash")
+local Effect1 = ReplicatedStorage.Effects.Skills.Water:WaitForChild("Slash1")
+local Hit1Anim = ReplicatedStorage.Animations.Styles.Breath.Water:WaitForChild("Hit1")
+local Effect2 = ReplicatedStorage.Effects.Skills.Water:WaitForChild("Slash2")
+local Hit2Anim = ReplicatedStorage.Animations.Styles.Breath.Water:WaitForChild("Hit2")
+
+local RaycastHitbox = require(ServerStorage.Modules.HitBoxes.RaycastHitboxV4)
+local BlockingModule = require(ServerStorage.Modules.BlockingModule)
+local StunHandler = require(ServerStorage.Modules.Other.StunHandlerV2)
+local StatusHandler = require(ServerStorage.Modules.Status.BreathingStatus)
+local StopTrack = require(ReplicatedStorage.Modules.AnimationStopper)
+
+local SpawnEffectEvent = Events.SpawnEffect
+
+local function getWaterStats(char: Model)
+	local weapon = char:GetAttribute("Weapon") or "Katana"
+	local waterTable = StatusHandler.getStats("Water")
+	return waterTable and waterTable[weapon] or { Damage2 = 5, Stun2 = 0.2 }
+end
+
+local function ApplyHitbox(char: Model, clone: Instance, stats: { Damage: number, Stun: number }, hitAnim: Animation)
+	local hitbox = RaycastHitbox.new(clone)
+
+	local params = RaycastParams.new()
+	params.FilterDescendantsInstances = { char }
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	hitbox.RaycastParams = params
+
+	hitbox.OnHit:Connect(function(hit, targetHumanoid, hitPos)
+		if not targetHumanoid then return end
+
+		local targetChar = targetHumanoid.Parent
+		if not targetChar or targetChar == char then return end
+		if targetChar:GetAttribute("Iframes") then return end
+		if targetChar:GetAttribute("NPC") then return end
+
+		if targetChar:GetAttribute("Parry") then
+			BlockingModule.Parrying(targetChar, char, hitPos)
+			return
+		end
+
+		if targetChar:GetAttribute("IsBlocking") then
+			BlockingModule.Blocking(targetChar, stats.Damage, hitPos)
+			return
+		end
+
+		targetHumanoid:TakeDamage(stats.Damage)
+		StunHandler.Stun(targetHumanoid, stats.Stun, 3, 0)
+
+		local targetAnimator = targetHumanoid:FindFirstChildOfClass("Animator")
+		if targetAnimator and hitAnim then
+			local track = targetAnimator:LoadAnimation(hitAnim)
+			track:Play()
+		end
+	end)
+
+	hitbox:HitStart(0.4)
+end
+
+local function SpawnEffect1(char: Model)
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	local clone = Effect1:Clone()
+	clone.Name = "SlashClone"
+	clone.Parent = char
+
+	local weld = clone:FindFirstChild("Weld")
+	if weld then
+		weld.Part0 = hrp
+		weld.Part1 = clone
+	end
+
+	Debris:AddItem(clone, 1)
+	SpawnEffectEvent:FireAllClients(char, clone.Name)
+
+	local stats = getWaterStats(char)
+	ApplyHitbox(char, clone, stats, Hit1Anim)
+end
+
+local function SpawnEffect2(char: Model)
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	local clone = Effect2:Clone()
+	clone.Name = "WaterSlash"
+	clone.Parent = char
+
+	local weld = clone:FindFirstChild("Weld")
+	if weld then
+		weld.Part0 = hrp
+		weld.Part1 = clone
+	end
+
+	Debris:AddItem(clone, 3)
+	SpawnEffectEvent:FireAllClients(char, clone.Name)
+
+	local stats = getWaterStats(char)
+	ApplyHitbox(char, clone, stats, Hit2Anim)
+end
+
+local function cleanup(char, track, lv, attachment, waterTrail, stunConn)
+	stunConn:Disconnect()
+	StopTrack.StopAllExceptIdle(char)
+	track:Stop()
+
+	if lv and lv.Parent then lv:Destroy() end
+	if attachment and attachment.Parent then attachment:Destroy() end
+
+	char:SetAttribute("A", false)
+	if waterTrail then waterTrail.Enabled = false end
+end
+
+function module.WaterDualSlash(char)
+	if char:GetAttribute("Stunned") then return end
+
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+	if not hrp or not humanoid or not animator then return end
+
+	local weaponName = char:GetAttribute("Weapon")
+	local weapon = weaponName and char:FindFirstChild(weaponName)
+	local waterTrail = weapon and weapon:FindFirstChild("Water", true)
+
+	local track = animator:LoadAnimation(WaterAnim)
+	track:Play()
+	track:AdjustSpeed(1.6)
+
+	waterTrail.Enabled = true
+	char:SetAttribute("A", true)
+
+	local attachment = Instance.new("Attachment")
+	attachment.Parent = hrp
+
+	local lv = Instance.new("LinearVelocity")
+	lv.Attachment0 = attachment
+	lv.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+	lv.MaxForce = 1e5
+	lv.RelativeTo = Enum.ActuatorRelativeTo.Attachment0
+	lv.VectorVelocity = Vector3.new(0, 1, -25)
+	lv.Parent = hrp
+
+	local stunConn
+	stunConn = char:GetAttributeChangedSignal("Stunned"):Connect(function()
+		if char:GetAttribute("Stunned") then
+			cleanup(char, track, lv, attachment, waterTrail, stunConn)
+		end
+	end)
+
+	track:GetMarkerReachedSignal("Slash1"):Connect(function()
+		SpawnEffect1(char)
+	end)
+
+	track:GetMarkerReachedSignal("Slash2"):Connect(function()
+		SpawnEffect2(char)
+	end)
+
+	task.delay(1.41, function()
+		if stunConn.Connected then stunConn:Disconnect() end
+		if lv and lv.Parent then lv:Destroy() end
+		if attachment and attachment.Parent then attachment:Destroy() end
+
+		char:SetAttribute("A", false)
+		if waterTrail then waterTrail.Enabled = false end
+	end)
+end
+
+return module
